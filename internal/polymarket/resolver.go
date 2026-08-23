@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/url"
 	"strconv"
@@ -30,11 +31,13 @@ type ResolvedMarket struct {
 }
 
 type ResolveOptions struct {
-	Now       time.Time
-	ProxyURL  string
-	BaseURL   string
-	Timeout   time.Duration
+	Now        time.Time
+	ProxyURL   string
+	BaseURL    string
+	Timeout    time.Duration
 	HTTPClient *http.Client
+	Attempts   int
+	RetryDelay time.Duration
 }
 
 type gammaMarket struct {
@@ -50,6 +53,16 @@ type gammaMarket struct {
 	OrderPriceMinTickSize json.RawMessage `json:"orderPriceMinTickSize"`
 	Outcomes              string          `json:"outcomes"`
 	ClobTokenIDs          string          `json:"clobTokenIds"`
+}
+
+type resolverStatusError struct {
+	Status int
+	Slug   string
+	Body   string
+}
+
+func (e *resolverStatusError) Error() string {
+	return fmt.Sprintf("gamma market status %d for slug %s: %s", e.Status, e.Slug, e.Body)
 }
 
 // CurrentBTC5MSlug returns the deterministic slug for the 5-minute UTC slot
@@ -79,8 +92,52 @@ func ResolveCurrentBTC5M(ctx context.Context, opts ResolveOptions) (ResolvedMark
 			return ResolvedMarket{}, err
 		}
 	}
+	attempts := opts.Attempts
+	if attempts <= 0 {
+		attempts = 3
+	}
+	retryDelay := opts.RetryDelay
+	if retryDelay <= 0 {
+		retryDelay = 200 * time.Millisecond
+	}
 	slug := CurrentBTC5MSlug(now)
-	return resolveBySlug(ctx, client, base, slug, now)
+	var lastErr error
+	for attempt := 1; attempt <= attempts; attempt++ {
+		m, err := resolveBySlug(ctx, client, base, slug, now)
+		if err == nil {
+			return m, nil
+		}
+		lastErr = err
+		if attempt == attempts || !isTransientResolverError(err) {
+			break
+		}
+		t := time.NewTimer(retryDelay)
+		select {
+		case <-ctx.Done():
+			t.Stop()
+			return ResolvedMarket{}, ctx.Err()
+		case <-t.C:
+		}
+	}
+	return ResolvedMarket{}, fmt.Errorf("resolve %s after %d attempt(s): %w", slug, attempts, lastErr)
+}
+
+func isTransientResolverError(err error) bool {
+	if err == nil {
+		return false
+	}
+	if errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) {
+		return true
+	}
+	var ne net.Error
+	if errors.As(err, &ne) {
+		return true
+	}
+	var se *resolverStatusError
+	if errors.As(err, &se) {
+		return se.Status == http.StatusTooManyRequests || se.Status >= 500
+	}
+	return false
 }
 
 func resolverHTTPClient(proxyURL string, timeout time.Duration) (*http.Client, error) {
@@ -114,10 +171,10 @@ func resolveBySlug(ctx context.Context, client *http.Client, base, slug string, 
 	defer resp.Body.Close()
 	body, err := io.ReadAll(io.LimitReader(resp.Body, 4<<20))
 	if err != nil {
-		return ResolvedMarket{}, err
+		return ResolvedMarket{}, fmt.Errorf("gamma market body: %w", err)
 	}
 	if resp.StatusCode != http.StatusOK {
-		return ResolvedMarket{}, fmt.Errorf("gamma market status %d for slug %s: %s", resp.StatusCode, slug, strings.TrimSpace(string(body)))
+		return ResolvedMarket{}, &resolverStatusError{Status: resp.StatusCode, Slug: slug, Body: strings.TrimSpace(string(body))}
 	}
 	var g gammaMarket
 	if err := json.Unmarshal(body, &g); err != nil {
@@ -199,8 +256,12 @@ func parseTickSize(raw json.RawMessage) (string, error) {
 	var s string
 	if err := json.Unmarshal(raw, &s); err == nil {
 		s = strings.TrimSpace(s)
-		if s == "" { return "", errors.New("empty tick size") }
-		if _, err := strconv.ParseFloat(s, 64); err != nil { return "", fmt.Errorf("invalid tick size %q", s) }
+		if s == "" {
+			return "", errors.New("empty tick size")
+		}
+		if _, err := strconv.ParseFloat(s, 64); err != nil {
+			return "", fmt.Errorf("invalid tick size %q", s)
+		}
 		return s, nil
 	}
 	var n json.Number
@@ -208,13 +269,17 @@ func parseTickSize(raw json.RawMessage) (string, error) {
 		return "", fmt.Errorf("decode tick size: %w", err)
 	}
 	s = n.String()
-	if _, err := strconv.ParseFloat(s, 64); err != nil { return "", fmt.Errorf("invalid tick size %q", s) }
+	if _, err := strconv.ParseFloat(s, 64); err != nil {
+		return "", fmt.Errorf("invalid tick size %q", s)
+	}
 	return s, nil
 }
 
 func firstNonEmpty(v ...string) string {
 	for _, s := range v {
-		if strings.TrimSpace(s) != "" { return s }
+		if strings.TrimSpace(s) != "" {
+			return s
+		}
 	}
 	return ""
 }
