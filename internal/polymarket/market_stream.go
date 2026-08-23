@@ -1,6 +1,7 @@
 package polymarket
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 )
@@ -24,6 +25,29 @@ type marketFrame struct {
 }
 
 func ParseEmbeddedBBOChanges(frame []byte) ([]PriceChange, error) {
+	frame = bytes.TrimSpace(frame)
+	if len(frame) == 0 {
+		return nil, nil
+	}
+	if frame[0] == '[' {
+		var raws []json.RawMessage
+		if err := json.Unmarshal(frame, &raws); err != nil {
+			return nil, err
+		}
+		var out []PriceChange
+		for _, raw := range raws {
+			changes, err := parseOneMarketFrame(raw)
+			if err != nil {
+				return nil, err
+			}
+			out = append(out, changes...)
+		}
+		return out, nil
+	}
+	return parseOneMarketFrame(frame)
+}
+
+func parseOneMarketFrame(frame []byte) ([]PriceChange, error) {
 	var m marketFrame
 	if err := json.Unmarshal(frame, &m); err != nil {
 		return nil, err
@@ -46,7 +70,10 @@ func ParseEmbeddedBBOChanges(frame []byte) ([]PriceChange, error) {
 			return nil, fmt.Errorf("best_bid_ask missing fields")
 		}
 		return []PriceChange{{AssetID: m.AssetID, BestBid: m.BestBid, BestAsk: m.BestAsk}}, nil
+	case "book", "last_trade_price", "tick_size_change", "new_market", "market_resolved", "":
+		return nil, nil
 	default:
+		// Unknown event types are ignored rather than treated as malformed BBO.
 		return nil, nil
 	}
 }
