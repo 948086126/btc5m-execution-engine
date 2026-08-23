@@ -30,6 +30,7 @@ type Config struct {
 	PlaneID      string
 	OutPath      string
 	URL          string
+	ProxyURL     string
 	MarketID     string
 	MarketSlug   string
 	UpToken      string
@@ -133,7 +134,7 @@ done:
 
 func runSession(ctx context.Context, aw *asyncwriter.Writer, cfg Config, sessionNo uint64, dataRecords *uint64) error {
 	sessionID := fmt.Sprintf("%s-%s-%d-%d", cfg.RunID, strings.ToLower(cfg.Source), time.Now().UnixMilli(), sessionNo)
-	c, err := livews.Dial(cfg.URL, 10*time.Second)
+	c, err := livews.DialWithProxy(cfg.URL, cfg.ProxyURL, 10*time.Second)
 	if err != nil {
 		return err
 	}
