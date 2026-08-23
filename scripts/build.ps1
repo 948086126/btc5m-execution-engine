@@ -2,7 +2,7 @@ $ErrorActionPreference = "Stop"
 Set-Location (Join-Path $PSScriptRoot "..")
 New-Item -Force -ItemType Directory bin/windows-amd64, bin/linux-amd64 | Out-Null
 $env:CGO_ENABLED="0"
-$cmds = @("verify","replay","mock_live","mock_source","mock_collector")
+$cmds = @("verify","replay","mock_live","mock_source","mock_collector","live_source","pm_resolve","pm_dual_smoke")
 foreach ($c in $cmds) {
   $env:GOOS="windows"; $env:GOARCH="amd64"
   go build -trimpath -o ("bin/windows-amd64/btc5m-" + ($c -replace '_','-') + ".exe") ("./cmd/"+$c)
