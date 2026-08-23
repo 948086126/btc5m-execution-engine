@@ -25,17 +25,17 @@ import (
 const schemaVersion = "GATE1A_EVENT_V2"
 
 type Config struct {
-	RunID       string
-	Source      string
-	PlaneID     string
-	OutPath     string
-	URL         string
-	MarketID    string
-	MarketSlug  string
-	UpToken     string
-	DownToken   string
-	TickSize    string
-	Duration    time.Duration
+	RunID        string
+	Source       string
+	PlaneID      string
+	OutPath      string
+	URL          string
+	MarketID     string
+	MarketSlug   string
+	UpToken      string
+	DownToken    string
+	TickSize     string
+	Duration     time.Duration
 	ReconnectMin time.Duration
 	ReconnectMax time.Duration
 }
@@ -53,26 +53,60 @@ type quotePayload struct {
 	AskQty float64 `json:"ask_qty"`
 }
 
+type observedFrame struct {
+	sequence uint64
+	wallMS   int64
+	monoNS   int64
+	hash     string
+	bytes    []byte
+}
+
 func Run(cfg Config) error {
-	if cfg.RunID == "" || cfg.Source == "" || cfg.OutPath == "" { return errors.New("run_id, source and out_path are required") }
+	if cfg.RunID == "" || cfg.Source == "" || cfg.OutPath == "" {
+		return errors.New("run_id, source and out_path are required")
+	}
 	if cfg.Duration <= 0 { cfg.Duration = 30 * time.Second }
 	if cfg.ReconnectMin <= 0 { cfg.ReconnectMin = 250 * time.Millisecond }
 	if cfg.ReconnectMax <= 0 { cfg.ReconnectMax = 5 * time.Second }
 	if err := os.MkdirAll(filepath.Dir(cfg.OutPath), 0o755); err != nil { return err }
-	jw, err := journal.NewWriter(cfg.OutPath); if err != nil { return err }
+	jw, err := journal.NewWriter(cfg.OutPath)
+	if err != nil { return err }
 	aw := asyncwriter.New(jw, asyncwriter.Options{QueueCapacity: 8192, EnqueueTimeout: 250 * time.Millisecond})
-	defer aw.Close()
-	ctx, cancel := context.WithTimeout(context.Background(), cfg.Duration); defer cancel()
+
+	ctx, cancel := context.WithTimeout(context.Background(), cfg.Duration)
+	defer cancel()
 	backoff := cfg.ReconnectMin
+	var runErr error
 	for session := uint64(1); ; session++ {
-		select { case <-ctx.Done(): return errors.Join(aw.Err(), nil); default: }
+		select {
+		case <-ctx.Done():
+			runErr = nil
+			goto done
+		default:
+		}
 		err := runSession(ctx, aw, cfg, session)
-		if err == nil || errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) { return errors.Join(aw.Err(), nil) }
-		if aw.Err() != nil { return aw.Err() }
+		if err == nil || errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) {
+			runErr = nil
+			goto done
+		}
+		if aw.Err() != nil {
+			runErr = aw.Err()
+			goto done
+		}
 		t := time.NewTimer(backoff)
-		select { case <-ctx.Done(): t.Stop(); return nil; case <-t.C: }
-		backoff *= 2; if backoff > cfg.ReconnectMax { backoff = cfg.ReconnectMax }
+		select {
+		case <-ctx.Done():
+			t.Stop()
+			runErr = nil
+			goto done
+		case <-t.C:
+		}
+		backoff *= 2
+		if backoff > cfg.ReconnectMax { backoff = cfg.ReconnectMax }
 	}
+
+done:
+	return errors.Join(runErr, aw.Close())
 }
 
 func runSession(ctx context.Context, aw *asyncwriter.Writer, cfg Config, sessionNo uint64) error {
@@ -80,47 +114,71 @@ func runSession(ctx context.Context, aw *asyncwriter.Writer, cfg Config, session
 	c, err := livews.Dial(cfg.URL, 10*time.Second)
 	if err != nil { return err }
 	defer c.Close()
-	var seq uint64
-	emit := func(kind event.Kind, sourceEventMS *int64, frame []byte, payload any) error {
-		seq++
+
+	var rawSeq uint64
+	emitTransport := func(state, detail string) error {
 		mono, err := btclock.MonotonicNS(); if err != nil { return err }
+		b, _ := json.Marshal(transportPayload{State: state, Detail: detail})
+		return aw.Enqueue(event.Record{SchemaVersion:schemaVersion,RunID:cfg.RunID,MarketID:cfg.MarketID,MarketSlug:cfg.MarketSlug,Source:cfg.Source,PlaneID:cfg.PlaneID,SourceSessionID:sessionID,SourceReceiveSequence:0,ReceiveWallMS:time.Now().UnixMilli(),ReceiveMonotonicNS:mono,Kind:event.KindTransport,TransportValidity:"VALID",Payload:b})
+	}
+	observe := func(frame []byte) (observedFrame, error) {
+		rawSeq++
+		mono, err := btclock.MonotonicNS(); if err != nil { return observedFrame{}, err }
+		s := sha256.Sum256(frame)
+		return observedFrame{sequence:rawSeq,wallMS:time.Now().UnixMilli(),monoNS:mono,hash:hex.EncodeToString(s[:]),bytes:frame},nil
+	}
+	emitObserved := func(obs observedFrame, kind event.Kind, sourceEventMS *int64, payload any) error {
 		b, err := json.Marshal(payload); if err != nil { return err }
-		h := ""; if frame != nil { s:=sha256.Sum256(frame); h=hex.EncodeToString(s[:]) }
-		rec := event.Record{SchemaVersion:schemaVersion,RunID:cfg.RunID,MarketID:cfg.MarketID,MarketSlug:cfg.MarketSlug,Source:cfg.Source,PlaneID:cfg.PlaneID,SourceSessionID:sessionID,SourceReceiveSequence:seq,ReceiveWallMS:time.Now().UnixMilli(),ReceiveMonotonicNS:mono,SourceEventMS:sourceEventMS,Kind:kind,TransportValidity:"VALID",FrameSHA256:h,Payload:b}
+		rec := event.Record{SchemaVersion:schemaVersion,RunID:cfg.RunID,MarketID:cfg.MarketID,MarketSlug:cfg.MarketSlug,Source:cfg.Source,PlaneID:cfg.PlaneID,SourceSessionID:sessionID,SourceReceiveSequence:obs.sequence,ReceiveWallMS:obs.wallMS,ReceiveMonotonicNS:obs.monoNS,SourceEventMS:sourceEventMS,Kind:kind,TransportValidity:"VALID",FrameSHA256:obs.hash,Payload:b}
 		return aw.Enqueue(rec)
 	}
-	if err := emit(event.KindTransport,nil,nil,transportPayload{State:"CONNECTED"}); err != nil { return err }
-	if strings.EqualFold(cfg.Source,"PM") {
-		if cfg.UpToken=="" || cfg.DownToken=="" || cfg.TickSize=="" { return errors.New("PM source requires up_token, down_token, tick_size") }
-		sub,_:=json.Marshal(map[string]any{"assets_ids":[]string{cfg.UpToken,cfg.DownToken},"type":"market"})
-		if err:=c.WriteText(sub);err!=nil{return err}
-		return readPM(ctx,c,emit,cfg)
+
+	if err := emitTransport("CONNECTED", ""); err != nil { return err }
+	if strings.EqualFold(cfg.Source, "PM") {
+		if cfg.UpToken == "" || cfg.DownToken == "" || cfg.TickSize == "" { return errors.New("PM source requires up_token, down_token, tick_size") }
+		sub, _ := json.Marshal(map[string]any{"assets_ids": []string{cfg.UpToken, cfg.DownToken}, "type": "market"})
+		if err := c.WriteText(sub); err != nil { return err }
+		return readPM(ctx, c, observe, emitObserved, cfg)
 	}
-	return readBinance(ctx,c,emit,cfg)
+	return readBinance(ctx, c, observe, emitObserved, cfg)
 }
 
-func readBinance(ctx context.Context, c *livews.Client, emit func(event.Kind,*int64,[]byte,any)error, cfg Config) error {
-	kind:=event.KindM2Quote; if strings.EqualFold(cfg.Source,"SPOT") { kind=event.KindSpotQuote }
+func readBinance(ctx context.Context, c *livews.Client, observe func([]byte)(observedFrame,error), emit func(observedFrame,event.Kind,*int64,any)error, cfg Config) error {
+	kind := event.KindM2Quote
+	if strings.EqualFold(cfg.Source, "SPOT") { kind = event.KindSpotQuote }
 	for {
 		select { case <-ctx.Done(): return ctx.Err(); default: }
-		_ = c.SetReadDeadline(time.Now().Add(20*time.Second))
-		frame,err:=c.ReadText(1<<20); if err!=nil { if ne,ok:=err.(net.Error);ok&&ne.Timeout(){return fmt.Errorf("read timeout: %w",err)}; return err }
-		q,err:=binance.ParseBookTicker(frame,"BTCUSDT"); if err!=nil{return fmt.Errorf("binance decode: %w",err)}
-		ep:=q.EventMS
-		if err:=emit(kind,&ep,frame,quotePayload{Symbol:q.Symbol,Bid:q.Bid,BidQty:q.BidQty,Ask:q.Ask,AskQty:q.AskQty});err!=nil{return err}
+		_ = c.SetReadDeadline(time.Now().Add(20 * time.Second))
+		frame, err := c.ReadText(1 << 20)
+		if err != nil { if ne,ok:=err.(net.Error);ok&&ne.Timeout(){return fmt.Errorf("read timeout: %w",err)}; return err }
+		obs, err := observe(frame); if err != nil { return err }
+		q, err := binance.ParseBookTicker(frame, "BTCUSDT")
+		if err != nil { return fmt.Errorf("binance decode after seq=%d: %w", obs.sequence, err) }
+		var ep *int64
+		if q.EventMS > 0 { v := q.EventMS; ep = &v }
+		if err := emit(obs, kind, ep, quotePayload{Symbol:q.Symbol,Bid:q.Bid,BidQty:q.BidQty,Ask:q.Ask,AskQty:q.AskQty}); err != nil { return err }
 	}
 }
 
-func readPM(ctx context.Context, c *livews.Client, emit func(event.Kind,*int64,[]byte,any)error, cfg Config) error {
-	state:=polymarket.NewDualTokenState(cfg.UpToken,cfg.DownToken,cfg.TickSize)
+func readPM(ctx context.Context, c *livews.Client, observe func([]byte)(observedFrame,error), emit func(observedFrame,event.Kind,*int64,any)error, cfg Config) error {
+	state := polymarket.NewDualTokenState(cfg.UpToken, cfg.DownToken, cfg.TickSize)
 	for {
 		select { case <-ctx.Done(): return ctx.Err(); default: }
-		_ = c.SetReadDeadline(time.Now().Add(20*time.Second))
-		frame,err:=c.ReadText(4<<20); if err!=nil { if ne,ok:=err.(net.Error);ok&&ne.Timeout(){return fmt.Errorf("read timeout: %w",err)}; return err }
-		changes,err:=polymarket.ParseEmbeddedBBOChanges(frame); if err!=nil{return fmt.Errorf("pm decode: %w",err)}
-		for _,ch:=range changes {
-			bbo,ready,err:=state.Apply(ch); if err!=nil{return fmt.Errorf("pm state: %w",err)}
-			if ready { if err:=emit(event.KindPMBBOState,nil,frame,bbo);err!=nil{return err} }
+		_ = c.SetReadDeadline(time.Now().Add(20 * time.Second))
+		frame, err := c.ReadText(4 << 20)
+		if err != nil { if ne,ok:=err.(net.Error);ok&&ne.Timeout(){return fmt.Errorf("read timeout: %w",err)}; return err }
+		obs, err := observe(frame); if err != nil { return err }
+		changes, err := polymarket.ParseEmbeddedBBOChanges(frame)
+		if err != nil { return fmt.Errorf("pm decode after seq=%d: %w", obs.sequence, err) }
+		var last polymarket.BBOState
+		ready := false
+		for _, ch := range changes {
+			bbo, ok, err := state.Apply(ch)
+			if err != nil { return fmt.Errorf("pm state after seq=%d: %w", obs.sequence, err) }
+			if ok { last, ready = bbo, true }
+		}
+		if ready {
+			if err := emit(obs, event.KindPMBBOState, nil, last); err != nil { return err }
 		}
 	}
 }
