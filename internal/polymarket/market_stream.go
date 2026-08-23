@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"math/big"
 )
 
 type PriceChange struct {
@@ -12,11 +13,18 @@ type PriceChange struct {
 	BestAsk string
 }
 
+type level struct {
+	Price string `json:"price"`
+	Size  string `json:"size"`
+}
+
 type marketFrame struct {
 	EventType    string `json:"event_type"`
 	AssetID      string `json:"asset_id"`
 	BestBid      string `json:"best_bid"`
 	BestAsk      string `json:"best_ask"`
+	Bids         []level `json:"bids"`
+	Asks         []level `json:"asks"`
 	PriceChanges []struct {
 		AssetID string `json:"asset_id"`
 		BestBid string `json:"best_bid"`
@@ -70,12 +78,40 @@ func parseOneMarketFrame(frame []byte) ([]PriceChange, error) {
 			return nil, fmt.Errorf("best_bid_ask missing fields")
 		}
 		return []PriceChange{{AssetID: m.AssetID, BestBid: m.BestBid, BestAsk: m.BestAsk}}, nil
-	case "book", "last_trade_price", "tick_size_change", "new_market", "market_resolved", "":
+	case "book":
+		if m.AssetID == "" {
+			return nil, fmt.Errorf("book missing asset_id")
+		}
+		bid, err := bestLevelPrice(m.Bids, true)
+		if err != nil { return nil, fmt.Errorf("book bid: %w", err) }
+		ask, err := bestLevelPrice(m.Asks, false)
+		if err != nil { return nil, fmt.Errorf("book ask: %w", err) }
+		// Reuse the frozen embedded-BBO boundary semantics downstream:
+		// no bid => 0, no ask => 1.
+		if bid == "" { bid = "0" }
+		if ask == "" { ask = "1" }
+		return []PriceChange{{AssetID: m.AssetID, BestBid: bid, BestAsk: ask}}, nil
+	case "last_trade_price", "tick_size_change", "new_market", "market_resolved", "":
 		return nil, nil
 	default:
 		// Unknown event types are ignored rather than treated as malformed BBO.
 		return nil, nil
 	}
+}
+
+func bestLevelPrice(levels []level, wantMax bool) (string, error) {
+	var best *big.Rat
+	bestRaw := ""
+	for _, l := range levels {
+		p, ok := new(big.Rat).SetString(l.Price)
+		if !ok { return "", fmt.Errorf("invalid price %q", l.Price) }
+		if p.Sign() <= 0 || p.Cmp(big.NewRat(1,1)) >= 0 { return "", fmt.Errorf("price outside (0,1): %q", l.Price) }
+		if best == nil || (wantMax && p.Cmp(best) > 0) || (!wantMax && p.Cmp(best) < 0) {
+			best = p
+			bestRaw = l.Price
+		}
+	}
+	return bestRaw, nil
 }
 
 type DualTokenState struct {
