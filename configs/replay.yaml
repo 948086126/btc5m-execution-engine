@@ -1,0 +1,4 @@
+mode: replay
+orders_enabled: false
+wallet_enabled: false
+strategy_enabled: false

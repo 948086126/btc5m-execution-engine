@@ -1,0 +1,88 @@
+{
+  "release": "BTC5M_EXECUTION_ENGINE_V1_LOCAL_MOCK_LIVE",
+  "validated_at_utc": "2026-08-23T14:36:28.026977+00:00",
+  "go_version": "go version go1.23.2 linux/amd64",
+  "go_test": "PASS",
+  "core_verify": {
+    "R2_BOUNDARY_CASE": "PASS",
+    "R3_COLLISION_CASE": "PASS",
+    "JOURNAL_INTEGRITY": "PASS",
+    "CORRUPTION_DETECTED": "PASS",
+    "MONOTONIC_CLOCK": "PASS",
+    "BACKPRESSURE_FAIL_CLOSED": "PASS"
+  },
+  "mock_live_receipt": {
+    "version": "V1_LOCAL_MOCK_LIVE",
+    "run_id": "mock-v1-1787495767073",
+    "duration_ms": 6000,
+    "results": [
+      {
+        "source": "M2",
+        "stats": {
+          "Records": 2689,
+          "Reconnects": 0,
+          "DecodeErrors": 0,
+          "BackpressureTrips": 0,
+          "EmptySideStates": 0
+        },
+        "journal": {
+          "records": 2690,
+          "terminal_hash": "886261e9427d2425842a420191b42a5356b5fe21b515a7aa8a7b362d9b02e2b0"
+        }
+      },
+      {
+        "source": "PM_A",
+        "plane": "A",
+        "stats": {
+          "Records": 570,
+          "Reconnects": 1,
+          "DecodeErrors": 0,
+          "BackpressureTrips": 0,
+          "EmptySideStates": 14
+        },
+        "journal": {
+          "records": 573,
+          "terminal_hash": "ed543c4224c86a77a80e94262ebe743bc091d909a6ea8b15f441f62976bd94fa"
+        }
+      },
+      {
+        "source": "PM_B",
+        "plane": "B",
+        "stats": {
+          "Records": 355,
+          "Reconnects": 0,
+          "DecodeErrors": 0,
+          "BackpressureTrips": 0,
+          "EmptySideStates": 9
+        },
+        "journal": {
+          "records": 356,
+          "terminal_hash": "74f358d0cdb91186a99afcf1fa8073505d65423e22f8eb08ae190841bbbdf571"
+        }
+      },
+      {
+        "source": "SPOT",
+        "stats": {
+          "Records": 1382,
+          "Reconnects": 0,
+          "DecodeErrors": 0,
+          "BackpressureTrips": 0,
+          "EmptySideStates": 0
+        },
+        "journal": {
+          "records": 1383,
+          "terminal_hash": "29fef6919263c576ac321a7742cb101dc70758b329d68b986159ce662b0779cc"
+        }
+      }
+    ],
+    "replay_items": 5002,
+    "verdict": "PASS"
+  },
+  "scope": [
+    "loopback-only",
+    "no-wallet",
+    "no-orders",
+    "no-live-internet-connectors",
+    "no-strategy"
+  ]
+}

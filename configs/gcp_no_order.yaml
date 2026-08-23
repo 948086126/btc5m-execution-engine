@@ -1,0 +1,5 @@
+mode: live-no-order
+orders_enabled: false
+wallet_enabled: false
+strategy_enabled: false
+# Live connectors are intentionally not implemented in V0.

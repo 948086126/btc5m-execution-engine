@@ -1,0 +1,20 @@
+mode: local-mock-live
+network_scope: loopback-only
+orders_enabled: false
+wallet_enabled: false
+strategy_enabled: false
+mock_duration_seconds: 6
+sources:
+  m2_rate_hz: 500
+  spot_rate_hz: 250
+  pm_a_rate_hz: 100
+  pm_b_rate_hz: 100
+faults:
+  pm_a_abrupt_disconnect_after_ms: 2000
+  pm_b_delivery_delay_ms: 15
+  pm_boundary_0_1_sentinel: true
+verification:
+  require_hash_chain: true
+  require_reconnect_observed: true
+  require_empty_side_observed: true
+  require_deterministic_replay: true
